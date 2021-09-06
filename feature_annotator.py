@@ -69,7 +69,8 @@ class FeatureAnnotator:
         # Check if plugin was started the first time in current QGIS session
         # Must be set in initGui() to survive plugin reloads
         self.first_start = None
-        self.feature_index = 0
+        self.feature_index = 1  # feature index starts at 1 as the attribute table in qgis does as well
+        self.n_feats = 0
         self.labeling_started = False
         self.canvas = self.iface.mapCanvas()
         self.classes = set()
@@ -300,6 +301,12 @@ class FeatureAnnotator:
         for feature in selection:
             value = feature[selected_field_index]  # does this work?
             fieldclasses.add(str(value))
+
+        fieldclasses.discard("NULL")
+        fieldclasses.discard("null")
+        fieldclasses.discard("none")
+        fieldclasses.discard("NONE")
+
         QgsMessageLog.logMessage(f"all classes from field: {sorted(list(fieldclasses))}", "feature_annotator")
         vectorlayer.removeSelection()
 
@@ -307,26 +314,36 @@ class FeatureAnnotator:
             self.classes.add(str(c))
         self.populate_class_lists()
 
+    def start_labeling(self):
+        """
+        setup some global variables like amount of features when starting the labeling process. then call parse_feature
+        """
+        vectorlayers = self.get_vectorlayers()
+        vectorlayer = vectorlayers[self.dlg.sourcelayercbox.currentIndex()]
+        # vectorlayer.selectAll()
+        # selection = vectorlayer.selectedFeatures()
+        self.n_feats = vectorlayer.featureCount()
+        self.parse_feature()
+
     def parse_feature(self):
         """
         Retrieve the value of the current feature at the selected field and display value in GUI, move the canvas to the extent of the feature.
         """
         # QgsMessageLog.logMessage(f"calling setup labeling", "feature_annotator")
         self.labeling_started = True
+
         vectorlayers = self.get_vectorlayers()
         vectorlayer = vectorlayers[self.dlg.sourcelayercbox.currentIndex()]
-        vectorlayer.selectAll()
-        selection = vectorlayer.selectedFeatures()
 
-        # set correct feature index, as Qgis indices are 1-indexed i'll Add one
-        self.dlg.featureindex.setText(str(self.feature_index + 1))
+        # set correct feature index
+        self.dlg.featureindex.setText(str(self.feature_index))
         QgsMessageLog.logMessage(f"feature index {self.feature_index}", "feature_annotator")
 
         selected_field_index = self.dlg.selectedannname.currentIndex()
         # set correct class label
 
-        for i, feature in enumerate(selection):
-            if i == self.feature_index:
+        for i, feature in enumerate(vectorlayer.getFeatures()):
+            if i == self.feature_index-1:
                 value = feature[selected_field_index]
                 idx = sorted(list(self.classes)).index(str(value))
                 QgsMessageLog.logMessage(f"all classes: {sorted(list(self.classes))}, idx of class: {idx}", "feature_annotator")
@@ -343,7 +360,7 @@ class FeatureAnnotator:
                 # TODO: zoom out a little from the polygon so you can see context better.
                 extent = QgsRectangle(xmin, ymin, xmax, ymax)
                 vectorlayer.removeSelection()
-                vectorlayer.select(self.feature_index)
+                vectorlayer.select(self.feature_index-1)
                 self.canvas.setExtent(extent)
                 self.canvas.refresh()
                 break
@@ -355,14 +372,8 @@ class FeatureAnnotator:
         if not self.labeling_started:
             return
 
-        vectorlayers = self.get_vectorlayers()
-        vectorlayer = vectorlayers[self.dlg.sourcelayercbox.currentIndex()]
-        vectorlayer.selectAll()
-        selection = vectorlayer.selectedFeatures()
-        QgsMessageLog.logMessage(f"n features: {len(selection)}", "feature_annotator")
-        if self.feature_index < len(selection) - 1:
+        if self.feature_index < self.n_feats:
             self.feature_index += 1
-        vectorlayer.removeSelection()
         self.parse_feature()
 
     def prev_item(self):
@@ -372,7 +383,7 @@ class FeatureAnnotator:
         if not self.labeling_started:
             return
 
-        if self.feature_index > 0:
+        if self.feature_index > 1:
             self.feature_index -= 1
         self.parse_feature()
 
@@ -383,16 +394,10 @@ class FeatureAnnotator:
         if not self.labeling_started:
             return
 
-        vectorlayers = self.get_vectorlayers()
-        vectorlayer = vectorlayers[self.dlg.sourcelayercbox.currentIndex()]
-        vectorlayer.selectAll()
-        selection = vectorlayer.selectedFeatures()
-        n_feats = len(selection)
-        vectorlayer.removeSelection()
         target_index = int(self.dlg.gotoindexlineedit.displayText())
 
-        if (target_index < n_feats - 1) & (target_index > 0):
-            self.feature_index = target_index - 1
+        if (target_index < self.n_feats) & (target_index > 0):
+            self.feature_index = target_index
             self.parse_feature()
 
     def clear_classes(self):
@@ -413,9 +418,9 @@ class FeatureAnnotator:
         vectorlayers = self.get_vectorlayers()
         vectorlayer = vectorlayers[self.dlg.sourcelayercbox.currentIndex()]
         selected_class = self.dlg.annotationcbox.currentText()
-        selected_field_index = self.dlg.selectedannname.currentIndex()
-        vectorlayer.dataProvider().changeAttributeValues({self.feature_index: {selected_field_index: selected_class}})
-        QgsMessageLog.logMessage(f"changed attr at feature index {self.feature_index} to: {selected_class} in field {selected_field_index}", "feature_annotator")
+        selected_annotation_index = self.dlg.selectedannname.currentIndex()
+        vectorlayer.dataProvider().changeAttributeValues({self.feature_index-1: {selected_annotation_index: selected_class}})
+        QgsMessageLog.logMessage(f"changed attr at feature index {self.feature_index} to: {selected_class} in field {selected_annotation_index}", "feature_annotator")
 
     def run(self):
         """Run method that performs all the real work"""
@@ -423,13 +428,14 @@ class FeatureAnnotator:
         # Create the dialog with elements (after translation) and keep reference
         # Only create GUI ONCE in callback, so that it will only load when the plugin is started
         if self.first_start:
+            QgsMessageLog.logMessage(f"started ", "feature_annotator")
             self.first_start = False
             # connect all buttons
             self.dlg.addlabeltype.clicked.connect(self.add_class)
             self.dlg.addanntype.clicked.connect(self.add_field)
             self.dlg.sourcelayercbox.currentIndexChanged.connect(self.source_select)
             self.dlg.retrieveclasses.clicked.connect(self.get_classes_from_field)
-            self.dlg.startlabeling.clicked.connect(self.parse_feature)
+            self.dlg.startlabeling.clicked.connect(self.start_labeling)
             self.dlg.nextbutton.clicked.connect(self.next_feature)
             self.dlg.prevbutton.clicked.connect(self.prev_item)
             self.dlg.annotationcbox.currentIndexChanged.connect(self.update_attr_table)
